@@ -146,13 +146,14 @@ def check_course(user, chat_id):
                 break
 
         if found_slot:
-            send_telegram(chat_id, f"🔄 Checking course: {user['course']}
-🎯 Found in Slot {found_slot}!")
+            send_telegram(chat_id, f"🔄 Checking course: {user['course']}")
+            send_telegram(chat_id, f"🎯 Found in Slot {found_slot}!")
             return True
         else:
-            send_telegram(chat_id, f"🔄 Checking course: {user['course']}
-❌ Not found in any slot.")
+            send_telegram(chat_id, f"🔄 Checking course: {user['course']}")
+            send_telegram(chat_id, "❌ Not found in any slot.")
             return False
+
 
     except Exception as e:
         send_telegram(chat_id, f"⚠️ Error: {e}")

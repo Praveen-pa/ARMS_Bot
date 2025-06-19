@@ -12,7 +12,6 @@ USERNAME = os.getenv("ARMS_USERNAME")
 PASSWORD = os.getenv("ARMS_PASSWORD")
 
 TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-GET_UPDATES_URL = f"{TELEGRAM_URL}/getUpdates"
 SEND_MSG_URL = f"{TELEGRAM_URL}/sendMessage"
 
 monitoring_enabled = False
@@ -34,9 +33,12 @@ def send_telegram(text):
 def check_for_commands():
     global monitoring_enabled, current_course, last_update_id
     try:
-        resp = requests.get(GET_UPDATES_URL).json()
+        url = f"{TELEGRAM_URL}/getUpdates?timeout=5"
+        if last_update_id is not None:
+            url += f"&offset={last_update_id + 1}"
+        resp = requests.get(url).json()
         updates = resp.get("result", [])
-        for update in reversed(updates):
+        for update in updates:
             msg = update.get("message", {})
             text = msg.get("text", "").strip()
             chat_id = msg.get("chat", {}).get("id")
@@ -45,22 +47,21 @@ def check_for_commands():
             if str(chat_id) != CHAT_ID:
                 continue
 
-            if last_update_id is None or update_id > last_update_id:
-                last_update_id = update_id
+            last_update_id = update_id
 
-                if text.lower() == "/start":
-                    monitoring_enabled = True
-                    current_course = None
-                    send_telegram("🤖 Monitoring started. Please enter the course code (e.g. ECA20):")
-                elif text.lower() == "/stop":
-                    monitoring_enabled = False
-                    current_course = None
-                    send_telegram("🛑 Monitoring stopped.")
-                elif monitoring_enabled and not current_course:
-                    current_course = text.upper()
-                    send_telegram(f"📌 Monitoring course: {current_course}")
-    except:
-        pass
+            if text.lower() == "/start":
+                monitoring_enabled = True
+                current_course = None
+                send_telegram("🤖 Monitoring started. Please enter the course code (e.g. ECA20):")
+            elif text.lower() == "/stop":
+                monitoring_enabled = False
+                current_course = None
+                send_telegram("🛑 Monitoring stopped.")
+            elif monitoring_enabled and not current_course:
+                current_course = text.upper()
+                send_telegram(f"📌 Monitoring course: {current_course}")
+    except Exception as e:
+        send_telegram(f"⚠️ Error reading Telegram: {e}")
 
 def check_course_in_slots(course_code):
     session = requests.Session()
@@ -69,7 +70,6 @@ def check_course_in_slots(course_code):
     api_base = "https://arms.sse.saveetha.com/Handler/Student.ashx?Page=StudentInfobyId&Mode=GetCourseBySlot&Id="
 
     try:
-        # Login
         resp = session.get(login_url)
         soup = BeautifulSoup(resp.text, 'html.parser')
 
@@ -101,8 +101,7 @@ def check_course_in_slots(course_code):
         found = False
         for slot_name, slot_id in slot_map.items():
             if not monitoring_enabled:
-                return False  # Stop early if user sent /stop
-
+                return False  # stop immediately if user stopped
             api_url = api_base + slot_id
             response = session.get(api_url)
             if response.status_code == 200 and course_code in response.text:
@@ -118,7 +117,7 @@ def check_course_in_slots(course_code):
         send_telegram(f"❌ Error: {e}")
         return False
 
-# Web server for Railway
+# Web server to keep Railway alive
 app = Flask('')
 
 @app.route('/')
@@ -132,7 +131,7 @@ def keep_alive():
     t = Thread(target=run_web)
     t.start()
 
-# Start webserver and bot
+# Start
 keep_alive()
 send_telegram("🤖 Bot is running. Send /start to begin monitoring.")
 
@@ -142,11 +141,12 @@ while True:
     if monitoring_enabled and current_course:
         found = check_course_in_slots(current_course)
         if found:
-            send_telegram(f"✅ Monitoring complete for {current_course}. Send a new course code or /stop.")
+            send_telegram(f"✅ Monitoring complete for {current_course}. Send a new course or /stop.")
             current_course = None
 
-        # Sleep in 3s chunks to allow checking stop status
+        # sleep 15 min, but check every 3s if stopped
         for _ in range(300):  # 300 × 3 = 900 seconds = 15 min
+            check_for_commands()
             if not monitoring_enabled:
                 break
             time.sleep(3)

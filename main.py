@@ -18,6 +18,7 @@ SEND_MSG_URL = f"{TELEGRAM_URL}/sendMessage"
 monitoring_enabled = False
 current_course = None
 last_update_id = None
+course_just_found = False
 
 # Slot Map
 slot_map = {
@@ -38,7 +39,7 @@ def send_telegram(text):
 
 # Handle /start, /stop and course input
 def check_for_commands():
-    global monitoring_enabled, current_course, last_update_id
+    global monitoring_enabled, current_course, last_update_id, course_just_found
     try:
         url = f"{TELEGRAM_URL}/getUpdates?timeout=5"
         if last_update_id is not None:
@@ -59,15 +60,18 @@ def check_for_commands():
             if text.lower() == "/start":
                 monitoring_enabled = True
                 current_course = None
+                course_just_found = False
                 send_telegram("🤖 Monitoring started. Please enter the course code (e.g. ECA20):")
 
             elif text.lower() == "/stop":
                 monitoring_enabled = False
                 current_course = None
+                course_just_found = False
                 send_telegram("🛑 Monitoring stopped.")
 
-            elif monitoring_enabled and current_course is None:
+            elif monitoring_enabled and not current_course:
                 current_course = text.upper()
+                course_just_found = False
                 send_telegram(f"📌 Monitoring course: {current_course}")
 
     except Exception as e:
@@ -157,11 +161,13 @@ while True:
         if found:
             send_telegram(f"✅ Monitoring complete for {current_course}. Please send the next course or /stop.")
             current_course = None
+            course_just_found = True
 
-        # Wait 15 minutes = 900 sec, check for stop command every 3 sec
+        # Wait 15 minutes, checking every 3 seconds for /stop or new input
         for _ in range(300):
             check_for_commands()
-            if not monitoring_enabled:
+            if not monitoring_enabled or course_just_found:
+                course_just_found = False
                 break
             time.sleep(3)
 

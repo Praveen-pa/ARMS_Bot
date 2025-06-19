@@ -1,20 +1,19 @@
 import os
 import time
+import json
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask
 from threading import Thread
 
-# ENV VARIABLES
+# Load Telegram Bot Token
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-SEND_MSG_URL = f"{TELEGRAM_URL}/sendMessage"
-GET_UPDATES_URL = f"{TELEGRAM_URL}/getUpdates"
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# TRACK USERS: chat_id => user_data
-users = {}
-last_update_id = None
+# State storage
+user_states = {}
 
+# Slot ID mapping
 slot_map = {
     'O': '15',
     'P': '16',
@@ -24,99 +23,87 @@ slot_map = {
     'T': '20'
 }
 
-# Telegram send message
 def send_telegram(chat_id, text):
-    requests.post(SEND_MSG_URL, data={"chat_id": chat_id, "text": text})
+    requests.post(f"{TELEGRAM_API}/sendMessage", data={"chat_id": chat_id, "text": text})
 
-# Check Telegram messages
-def check_for_commands():
+def check_for_updates():
     global last_update_id
-
     try:
-        resp = requests.get(GET_UPDATES_URL).json()
-        updates = resp.get("result", [])
-
-        for update in reversed(updates):
-            msg = update.get("message", {})
-            chat_id = msg.get("chat", {}).get("id")
-            text = msg.get("text", "").strip()
+        res = requests.get(f"{TELEGRAM_API}/getUpdates", timeout=5)
+        updates = res.json().get("result", [])
+        for update in updates:
+            message = update.get("message", {})
+            chat_id = str(message.get("chat", {}).get("id"))
+            text = message.get("text", "").strip()
             update_id = update["update_id"]
 
-            if last_update_id is None or update_id > last_update_id:
-                last_update_id = update_id
-                handle_user_input(chat_id, text)
+            if "last_update_id" not in user_states:
+                user_states["last_update_id"] = 0
+
+            if update_id <= user_states["last_update_id"]:
+                continue
+
+            user_states["last_update_id"] = update_id
+            handle_message(chat_id, text)
 
     except Exception as e:
-        print(f"[Error] Telegram polling failed: {e}")
+        print(f"Update check error: {e}")
 
-# Handle user commands and input flow
-def handle_user_input(chat_id, text):
-    user = users.get(chat_id)
+def handle_message(chat_id, text):
+    state = user_states.get(chat_id, {
+        "monitoring": False,
+        "step": None,
+        "username": None,
+        "password": None,
+        "course": None
+    })
 
     if text.lower() == "/start":
-        if not user:
-            users[chat_id] = {"step": "awaiting_username", "monitoring": False}
-            send_telegram(chat_id, "🔐 Please enter your ARMS username:")
+        if not state["username"]:
+            state["step"] = "awaiting_password"
+            send_telegram(chat_id, "🔐 Please enter your ARMS password:")
         else:
-            users[chat_id]["monitoring"] = True
-            users[chat_id]["step"] = "awaiting_course"
+            state["step"] = "awaiting_course"
             send_telegram(chat_id, "🤖 Monitoring started. Please enter the course code (e.g. ECA20):")
+        state["monitoring"] = True
 
     elif text.lower() == "/stop":
-        if user:
-            user["monitoring"] = False
+        state["monitoring"] = False
+        state["course"] = None
+        state["step"] = None
         send_telegram(chat_id, "🛑 Monitoring stopped.")
 
     elif text.lower() == "/logout":
-        users.pop(chat_id, None)
-        send_telegram(chat_id, "🔓 You have been logged out. Send /start to begin again.")
+        user_states.pop(chat_id, None)
+        send_telegram(chat_id, "🔓 Logged out. Send /start to begin again.")
 
     elif text.lower() == "/empty":
         send_telegram(chat_id, "🧹 Chat cleared.")
-        # Optional: Add command to delete messages via Telegram Bot API if needed
 
-    elif user:
-        step = user.get("step")
-        if step == "awaiting_username":
-            user["username"] = text
-            user["step"] = "awaiting_password"
-            send_telegram(chat_id, "🔐 Now enter your ARMS password:")
-        elif step == "awaiting_password":
-            user["password"] = text
-            user["step"] = "awaiting_course"
-            send_telegram(chat_id, "✅ Login saved. Now enter the course code:")
-        elif step == "awaiting_course":
-            user["course"] = text.upper()
-            user["monitoring"] = True
-            send_telegram(chat_id, f"📌 Monitoring course: {user['course']}")
-        else:
-            # Ignore extra input
-            pass
+    elif state["step"] == "awaiting_password":
+        state["password"] = text
+        state["step"] = "awaiting_course"
+        send_telegram(chat_id, "📘 Please enter the course code to monitor:")
 
-# Check course for all users
-def check_courses_for_all_users():
-    for chat_id, user in users.items():
-        if user.get("monitoring") and all(k in user for k in ["username", "password", "course"]):
-            found = check_course(user["username"], user["password"], user["course"])
-            if found:
-                send_telegram(chat_id, f"🎯 Found {user['course']} in Slot {found}!")
-                user["monitoring"] = True
-                user["step"] = "awaiting_course"
-                send_telegram(chat_id, "✅ Monitoring complete. Send next course or /stop.")
-            else:
-                send_telegram(chat_id, f"❌ {user['course']} not found in any slot.")
+    elif state["step"] == "awaiting_course":
+        state["course"] = text.upper()
+        send_telegram(chat_id, f"📌 Monitoring course: {state['course']}")
 
-# Course checking logic (reusable)
-def check_course(username, password, course_code):
+    user_states[chat_id] = state
+
+def check_course(chat_id):
+    state = user_states[chat_id]
+    course_code = state["course"]
+    username = state["username"]
+    password = state["password"]
+
     session = requests.Session()
     try:
         login_url = "https://arms.sse.saveetha.com/"
-        enroll_url = "https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx"
+        enrollment_url = "https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx"
         api_base = "https://arms.sse.saveetha.com/Handler/Student.ashx?Page=StudentInfobyId&Mode=GetCourseBySlot&Id="
 
-        # Login
-        login_page = session.get(login_url)
-        soup = BeautifulSoup(login_page.text, 'html.parser')
+        soup = BeautifulSoup(session.get(login_url).text, "html.parser")
         payload = {
             '__VIEWSTATE': soup.find('input', {'name': '__VIEWSTATE'}).get('value'),
             '__VIEWSTATEGENERATOR': soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value'),
@@ -126,42 +113,62 @@ def check_course(username, password, course_code):
             'btnlogin': 'Login'
         }
 
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Referer': login_url
+        }
+
         login_resp = session.post(login_url, data=payload, headers=headers)
         if "Logout" not in login_resp.text:
-            return False
+            send_telegram(chat_id, "❌ Login failed.")
+            return
 
-        session.get(enroll_url)  # Go to enrollment page
+        enroll_resp = session.get(enrollment_url)
+        if "Enrollment" not in enroll_resp.text:
+            send_telegram(chat_id, "❌ Enrollment page failed.")
+            return
 
-        for slot_name, slot_id in slot_map.items():
-            api_url = api_base + slot_id
-            resp = session.get(api_url)
-            if course_code in resp.text:
-                return slot_name
-        return False
+        found = False
+        for slot, slot_id in slot_map.items():
+            r = session.get(api_base + slot_id)
+            if course_code in r.text:
+                send_telegram(chat_id, f"🔄 Checking course: {course_code}\n🎯 Found in Slot {slot}!")
+                found = True
+                break
+
+        if not found:
+            send_telegram(chat_id, f"🔄 Checking course: {course_code}\n❌ Not found in any slot.")
+
+        if found:
+            send_telegram(chat_id, f"✅ Monitoring complete for {course_code}. Send a new course or /stop.")
+            user_states[chat_id]["course"] = None
+            user_states[chat_id]["step"] = "awaiting_course"
+
     except Exception as e:
-        print(f"[Course Check Error] {e}")
-        return False
+        send_telegram(chat_id, f"⚠️ Error occurred: {e}")
 
-# Flask Keep-Alive
-app = Flask('')
+def monitor_loop():
+    while True:
+        check_for_updates()
+        for chat_id, state in list(user_states.items()):
+            if isinstance(state, dict) and state.get("monitoring") and state.get("course") and state.get("username") and state.get("password"):
+                check_course(chat_id)
+        time.sleep(900)  # 15 minutes
+
+# Flask for Railway health check
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Multi-User ARMS Bot Running"
+    return "✅ Bot is alive"
 
 def run_web():
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
-    t = Thread(target=run_web)
-    t.start()
+    Thread(target=run_web).start()
 
-# Main loop
 keep_alive()
-send_telegram(os.getenv("CHAT_ID"), "🤖 Multi-user ARMS bot is live. Send /start to begin.")
-
-while True:
-    check_for_commands()
-    check_courses_for_all_users()
-    time.sleep(900)  # Every 15 minutes
+send_telegram(os.getenv("ADMIN_CHAT_ID", ""), "🤖 Bot deployed. Send /start to begin.")
+monitor_loop()

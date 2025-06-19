@@ -6,6 +6,7 @@ from flask import Flask
 from threading import Thread
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
@@ -14,7 +15,8 @@ TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 SEND_MSG_URL = f"{TELEGRAM_URL}/sendMessage"
 GET_UPDATES_URL = f"{TELEGRAM_URL}/getUpdates"
 
-users = {}
+# State data for each user
+users = {}  # {chat_id: {'username': str, 'password': str, 'course': str, 'monitoring': bool}}
 last_update_id = None
 
 slot_map = {
@@ -26,6 +28,7 @@ slot_map = {
     'T': '20'
 }
 
+# Flask app to keep Railway alive
 app = Flask('')
 
 @app.route('/')
@@ -146,19 +149,17 @@ def check_course(user, chat_id):
                 break
 
         if found_slot:
-            send_telegram(chat_id, f"🔄 Checking course: {user['course']}")
-            send_telegram(chat_id, f"🎯 Found in Slot {found_slot}!")
+            send_telegram(chat_id, f"🔄 Checking course: {user['course']}\n🎯 Found in Slot {found_slot}!")
             return True
         else:
-            send_telegram(chat_id, f"🔄 Checking course: {user['course']}")
-            send_telegram(chat_id, "❌ Not found in any slot.")
+            send_telegram(chat_id, f"🔄 Checking course: {user['course']}\n❌ Not found in any slot.")
             return False
-
 
     except Exception as e:
         send_telegram(chat_id, f"⚠️ Error: {e}")
         return False
 
+# Main loop
 send_telegram(OWNER_CHAT_ID, "🤖 Bot deployed. Send /start to begin.")
 keep_alive()
 
@@ -168,5 +169,5 @@ while True:
         if user['monitoring'] and user['username'] and user['password'] and user['course']:
             result = check_course(user, chat_id)
             if result:
-                user['course'] = None
-    time.sleep(900)
+                user['course'] = None  # Reset course to ask next one
+    time.sleep(5 if not users else 900)

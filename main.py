@@ -5,7 +5,7 @@ import os
 from flask import Flask
 from threading import Thread
 
-# Load secrets
+# Load from environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 USERNAME = os.getenv("ARMS_USERNAME")
@@ -14,10 +14,12 @@ PASSWORD = os.getenv("ARMS_PASSWORD")
 TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 SEND_MSG_URL = f"{TELEGRAM_URL}/sendMessage"
 
+# State
 monitoring_enabled = False
 current_course = None
 last_update_id = None
 
+# Slot Map
 slot_map = {
     'O': '15',
     'P': '16',
@@ -27,9 +29,14 @@ slot_map = {
     'T': '20'
 }
 
+# Send Telegram Message
 def send_telegram(text):
-    requests.post(SEND_MSG_URL, data={"chat_id": CHAT_ID, "text": text})
+    try:
+        requests.post(SEND_MSG_URL, data={"chat_id": CHAT_ID, "text": text})
+    except:
+        pass
 
+# Handle /start, /stop and course input
 def check_for_commands():
     global monitoring_enabled, current_course, last_update_id
     try:
@@ -53,16 +60,20 @@ def check_for_commands():
                 monitoring_enabled = True
                 current_course = None
                 send_telegram("🤖 Monitoring started. Please enter the course code (e.g. ECA20):")
+
             elif text.lower() == "/stop":
                 monitoring_enabled = False
                 current_course = None
                 send_telegram("🛑 Monitoring stopped.")
-            elif monitoring_enabled and not current_course:
+
+            elif monitoring_enabled and current_course is None:
                 current_course = text.upper()
                 send_telegram(f"📌 Monitoring course: {current_course}")
+
     except Exception as e:
         send_telegram(f"⚠️ Error reading Telegram: {e}")
 
+# Main course checking logic
 def check_course_in_slots(course_code):
     session = requests.Session()
     login_url = "https://arms.sse.saveetha.com/"
@@ -70,6 +81,7 @@ def check_course_in_slots(course_code):
     api_base = "https://arms.sse.saveetha.com/Handler/Student.ashx?Page=StudentInfobyId&Mode=GetCourseBySlot&Id="
 
     try:
+        # Login
         resp = session.get(login_url)
         soup = BeautifulSoup(resp.text, 'html.parser')
 
@@ -98,26 +110,26 @@ def check_course_in_slots(course_code):
             send_telegram("❌ Enrollment page failed.")
             return False
 
-        found = False
+        # Check each slot
         for slot_name, slot_id in slot_map.items():
             if not monitoring_enabled:
-                return False  # stop immediately if user stopped
+                return False  # user stopped monitoring
+
             api_url = api_base + slot_id
             response = session.get(api_url)
+
             if response.status_code == 200 and course_code in response.text:
                 send_telegram(f"🔄 Checking course: {course_code}\n🎯 Found in Slot {slot_name}!")
-                found = True
-                break
+                return True
 
-        if not found:
-            send_telegram(f"🔄 Checking course: {course_code}\n❌ Not found in any slot.")
-        return found
-
-    except Exception as e:
-        send_telegram(f"❌ Error: {e}")
+        send_telegram(f"🔄 Checking course: {course_code}\n❌ Not found in any slot.")
         return False
 
-# Web server to keep Railway alive
+    except Exception as e:
+        send_telegram(f"❌ Error during check: {e}")
+        return False
+
+# Uptime keep-alive for Railway
 app = Flask('')
 
 @app.route('/')
@@ -135,20 +147,23 @@ def keep_alive():
 keep_alive()
 send_telegram("🤖 Bot is running. Send /start to begin monitoring.")
 
+# 🔁 MAIN LOOP
 while True:
     check_for_commands()
 
     if monitoring_enabled and current_course:
         found = check_course_in_slots(current_course)
+
         if found:
-            send_telegram(f"✅ Monitoring complete for {current_course}. Send a new course or /stop.")
+            send_telegram(f"✅ Monitoring complete for {current_course}. Please send the next course or /stop.")
             current_course = None
 
-        # sleep 15 min, but check every 3s if stopped
-        for _ in range(300):  # 300 × 3 = 900 seconds = 15 min
+        # Wait 15 minutes = 900 sec, check for stop command every 3 sec
+        for _ in range(300):
             check_for_commands()
             if not monitoring_enabled:
                 break
             time.sleep(3)
+
     else:
         time.sleep(5)

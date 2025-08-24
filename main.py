@@ -4,21 +4,23 @@ import time
 import os
 from flask import Flask
 from threading import Thread
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load from environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
+CHAT_ID = os.getenv("CHAT_ID")
+USERNAME = os.getenv("ARMS_USERNAME")
+PASSWORD = os.getenv("ARMS_PASSWORD")
 
 TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 SEND_MSG_URL = f"{TELEGRAM_URL}/sendMessage"
-GET_UPDATES_URL = f"{TELEGRAM_URL}/getUpdates"
 
-# State data for each user
-users = {}  # {chat_id: {'username': str, 'password': str, 'course': str, 'monitoring': bool}}
+# State
+monitoring_enabled = False
+current_course = None
 last_update_id = None
+course_just_found = False
 
+# Slot Map
 slot_map = {
     'O': '15',
     'P': '16',
@@ -28,99 +30,71 @@ slot_map = {
     'T': '20'
 }
 
-# Flask app to keep Railway alive
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "✅ Bot is running."
-
-def run_web():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run_web)
-    t.start()
-
-def send_telegram(chat_id, text):
-    requests.post(SEND_MSG_URL, data={"chat_id": chat_id, "text": text})
-
-def extract_hidden_fields(html):
-    soup = BeautifulSoup(html, 'html.parser')
-    return {
-        '__VIEWSTATE': soup.find('input', {'name': '__VIEWSTATE'}).get('value'),
-        '__VIEWSTATEGENERATOR': soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value'),
-        '__EVENTVALIDATION': soup.find('input', {'name': '__EVENTVALIDATION'}).get('value')
-    }
-
-def check_for_commands():
-    global last_update_id
+# Send Telegram Message
+def send_telegram(text):
     try:
-        resp = requests.get(GET_UPDATES_URL).json()
+        requests.post(SEND_MSG_URL, data={"chat_id": CHAT_ID, "text": text})
+    except:
+        pass
+
+# Handle /start, /stop and course input
+def check_for_commands():
+    global monitoring_enabled, current_course, last_update_id, course_just_found
+    try:
+        url = f"{TELEGRAM_URL}/getUpdates?timeout=5"
+        if last_update_id is not None:
+            url += f"&offset={last_update_id + 1}"
+        resp = requests.get(url).json()
         updates = resp.get("result", [])
-        for update in reversed(updates):
+        for update in updates:
             msg = update.get("message", {})
             text = msg.get("text", "").strip()
-            chat_id = str(msg.get("chat", {}).get("id"))
+            chat_id = msg.get("chat", {}).get("id")
             update_id = update["update_id"]
 
-            if last_update_id is None or update_id > last_update_id:
-                last_update_id = update_id
-                if chat_id not in users:
-                    users[chat_id] = {'username': None, 'password': None, 'course': None, 'monitoring': False}
+            if str(chat_id) != CHAT_ID:
+                continue
 
-                user = users[chat_id]
+            last_update_id = update_id
 
-                if text.lower() == "/start":
-                    user['monitoring'] = True
-                    if not user['username']:
-                        send_telegram(chat_id, "🔐 Please enter your ARMS username:")
-                    elif not user['password']:
-                        send_telegram(chat_id, "🔐 Please enter your ARMS password:")
-                    elif not user['course']:
-                        send_telegram(chat_id, "📘 Please enter the course code to monitor:")
-                    else:
-                        send_telegram(chat_id, f"📌 Monitoring course: {user['course']}")
+            if text.lower() == "/start":
+                monitoring_enabled = True
+                current_course = None
+                course_just_found = False
+                send_telegram("🤖 Monitoring started. Please enter the course code (e.g. ECA20):")
 
-                elif text.lower() == "/stop":
-                    user['monitoring'] = False
-                    send_telegram(chat_id, "🛑 Monitoring stopped.")
+            elif text.lower() == "/stop":
+                monitoring_enabled = False
+                current_course = None
+                course_just_found = False
+                send_telegram("🛑 Monitoring stopped.")
 
-                elif text.lower() == "/logout":
-                    users.pop(chat_id)
-                    send_telegram(chat_id, "🔒 You have been logged out. Send /start to login again.")
-
-                elif text.lower() == "/empty":
-                    send_telegram(chat_id, "🧹 Chat cleared.")
-
-                elif user['monitoring']:
-                    if not user['username']:
-                        user['username'] = text
-                        send_telegram(chat_id, "🔐 Please enter your ARMS password:")
-                    elif not user['password']:
-                        user['password'] = text
-                        send_telegram(chat_id, "📘 Please enter the course code to monitor:")
-                    elif not user['course']:
-                        user['course'] = text.upper()
-                        send_telegram(chat_id, f"📌 Monitoring course: {user['course']}")
+            elif monitoring_enabled and not current_course:
+                current_course = text.upper()
+                course_just_found = False
+                send_telegram(f"📌 Monitoring course: {current_course}")
 
     except Exception as e:
-        print("Error checking commands:", e)
+        send_telegram(f"⚠️ Error reading Telegram: {e}")
 
-def check_course(user, chat_id):
+# Main course checking logic
+def check_course_in_slots(course_code):
     session = requests.Session()
     login_url = "https://arms.sse.saveetha.com/"
     enrollment_url = "https://arms.sse.saveetha.com/StudentPortal/Enrollment.aspx"
     api_base = "https://arms.sse.saveetha.com/Handler/Student.ashx?Page=StudentInfobyId&Mode=GetCourseBySlot&Id="
 
     try:
+        # Login
         resp = session.get(login_url)
-        fields = extract_hidden_fields(resp.text)
+        soup = BeautifulSoup(resp.text, 'html.parser')
 
         payload = {
-            **fields,
-            'txtusername': user['username'],
-            'txtpassword': user['password'],
+            '__VIEWSTATE': soup.find('input', {'name': '__VIEWSTATE'}).get('value'),
+            '__VIEWSTATEGENERATOR': soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value'),
+            '__EVENTVALIDATION': soup.find('input', {'name': '__EVENTVALIDATION'}).get('value'),
+            'txtusername': USERNAME,
+            'txtpassword': PASSWORD,
             'btnlogin': 'Login'
         }
 
@@ -132,42 +106,70 @@ def check_course(user, chat_id):
 
         login_resp = session.post(login_url, data=payload, headers=headers)
         if "Logout" not in login_resp.text:
-            send_telegram(chat_id, "❌ Login failed. Please check your credentials and send /logout.")
+            send_telegram("❌ Login failed.")
             return False
 
         enroll_resp = session.get(enrollment_url)
         if "Enrollment" not in enroll_resp.text:
-            send_telegram(chat_id, "❌ Failed to load enrollment page.")
+            send_telegram("❌ Enrollment page failed.")
             return False
 
-        found_slot = None
+        # Check each slot
         for slot_name, slot_id in slot_map.items():
+            if not monitoring_enabled:
+                return False  # user stopped monitoring
+
             api_url = api_base + slot_id
             response = session.get(api_url)
-            if response.status_code == 200 and user['course'] in response.text:
-                found_slot = slot_name
-                break
 
-        if found_slot:
-            send_telegram(chat_id, f"🔄 Checking course: {user['course']}\n🎯 Found in Slot {found_slot}!")
-            return True
-        else:
-            send_telegram(chat_id, f"🔄 Checking course: {user['course']}\n❌ Not found in any slot.")
-            return False
+            if response.status_code == 200 and course_code in response.text:
+                send_telegram(f"🔄 Checking course: {course_code}\n🎯 Found in Slot {slot_name}!")
+                return True
 
-    except Exception as e:
-        send_telegram(chat_id, f"⚠️ Error: {e}")
+        send_telegram(f"🔄 Checking course: {course_code}\n❌ Not found in any slot.")
         return False
 
-# Main loop
-send_telegram(OWNER_CHAT_ID, "🤖 Bot deployed. Send /start to begin.")
-keep_alive()
+    except Exception as e:
+        send_telegram(f"❌ Error during check: {e}")
+        return False
 
+# Uptime keep-alive for Railway
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "✅ Bot is alive!"
+
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.start()
+
+# Start
+keep_alive()
+send_telegram("🤖 Bot is running. Send /start to begin monitoring.")
+
+# 🔁 MAIN LOOP
 while True:
     check_for_commands()
-    for chat_id, user in users.items():
-        if user['monitoring'] and user['username'] and user['password'] and user['course']:
-            result = check_course(user, chat_id)
-            if result:
-                user['course'] = None  # Reset course to ask next one
-    time.sleep(5 if not users else 900)
+
+    if monitoring_enabled and current_course:
+        found = check_course_in_slots(current_course)
+
+        if found:
+            send_telegram(f"✅ Monitoring complete for {current_course}. Please send the next course or /stop.")
+            current_course = None
+            course_just_found = True
+
+        # Wait 15 minutes, checking every 3 seconds for /stop or new input
+        for _ in range(300):
+            check_for_commands()
+            if not monitoring_enabled or course_just_found:
+                course_just_found = False
+                break
+            time.sleep(3)
+
+    else:
+        time.sleep(5)

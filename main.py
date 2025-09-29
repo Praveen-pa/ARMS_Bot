@@ -158,13 +158,29 @@ app = Flask('')
 def home():
     return "✅ Bot is alive!"
 
+def self_ping():
+    while True:
+        try:
+            url = os.getenv("SELF_URL")  # set this in Render environment
+            if url:
+                requests.get(url)
+        except Exception as e:
+            print(f"Self-ping failed: {e}")
+        time.sleep(600)  # ping every 10 minutes
+
 def run_web():
     port = int(os.getenv("PORT", 8080))
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
+    # Start Flask web server in a thread
     t = Thread(target=run_web)
     t.start()
+
+    # Start self-ping in another thread
+    pinger = Thread(target=self_ping)
+    pinger.daemon = True
+    pinger.start()
 
 # Start
 keep_alive()
